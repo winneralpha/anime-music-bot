@@ -6,7 +6,7 @@ import random
 import os
 
 # ─── CONFIG ───────────────────────────────────────────────
-TOKEN = os.environ.get("DISCORD_TOKEN")  # Remplace par ton token Discord
+TOKEN = "DISCORD_TOKEN"  # Remplace par ton token Discord
 
 # Liste de tes openings (tu peux en ajouter autant que tu veux)
 OPENINGS = [
@@ -99,12 +99,13 @@ async def on_voice_state_update(member, before, after):
     guild = member.guild
 
     # Quelqu'un rejoint un salon vocal
-    if after.channel and not before.channel:
+    if after.channel and before.channel != after.channel:
         voice_client = guild.voice_client
 
         # Le bot n'est pas encore connecté
-        if not voice_client:
+        if not voice_client or not voice_client.is_connected():
             try:
+                await asyncio.sleep(1)  # Délai pour éviter les boucles
                 voice_client = await after.channel.connect()
                 playing_guilds.add(guild.id)
                 await play_next(voice_client, guild.id)
