@@ -6,9 +6,8 @@ import random
 import os
 
 # ─── CONFIG ───────────────────────────────────────────────
-TOKEN = "DISCORD_TOKEN"  # Remplace par ton token Discord
+TOKEN = os.environ.get("DISCORD_TOKEN")
 
-# Liste de tes openings (tu peux en ajouter autant que tu veux)
 OPENINGS = [
     "Gurenge LiSA Demon Slayer opening",
     "Inferno Mrs Green Apple Dr Stone opening",
@@ -30,7 +29,6 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Options yt-dlp pour extraire l'audio YouTube
 YDL_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -43,16 +41,19 @@ FFMPEG_OPTIONS = {
     "options": "-vn",
 }
 
-# Stocke les guilds où le bot joue déjà
+# Verrous par guild pour éviter les connexions multiples
+connecting_guilds = set()
 playing_guilds = set()
 
 
 # ─── FONCTIONS ────────────────────────────────────────────
-async def get_audio_url(query: str) -> str | None:
-    """Cherche la musique sur YouTube et retourne l'URL audio."""
+async def get_audio_url(query: str):
+    loop = asyncio.get_event_loop()
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
         try:
-            info = ydl.extract_info(f"ytsearch:{query}", download=False)
+            info = await loop.run_in_executor(
+                None, lambda: ydl.extract_info(f"ytsearch:{query}", download=False)
+            )
             if "entries" in info and info["entries"]:
                 return info["entries"][0]["url"]
         except Exception as e:
@@ -61,8 +62,9 @@ async def get_audio_url(query: str) -> str | None:
 
 
 async def play_next(voice_client, guild_id):
-    """Lance le prochain opening en aléatoire."""
     if guild_id not in playing_guilds:
+        return
+    if not voice_client or not voice_client.is_connected():
         return
 
     query = random.choice(OPENINGS)
@@ -70,18 +72,23 @@ async def play_next(voice_client, guild_id):
 
     url = await get_audio_url(query)
     if not url:
-        print(f"[{guild_id}] Impossible de récupérer l'audio, on réessaie...")
-        await asyncio.sleep(2)
+        print(f"[{guild_id}] URL introuvable, on réessaie dans 3s...")
+        await asyncio.sleep(3)
         await play_next(voice_client, guild_id)
         return
 
     def after_play(error):
         if error:
             print(f"Erreur lecture : {error}")
-        asyncio.run_coroutine_threadsafe(play_next(voice_client, guild_id), bot.loop)
+        asyncio.run_coroutine_threadsafe(
+            play_next(voice_client, guild_id), bot.loop
+        )
 
-    source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
-    voice_client.play(source, after=after_play)
+    try:
+        source = discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS)
+        voice_client.play(source, after=after_play)
+    except Exception as e:
+        print(f"Erreur play : {e}")
 
 
 # ─── ÉVÉNEMENTS ───────────────────────────────────────────
@@ -92,42 +99,44 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Se connecte quand quelqu'un rejoint un salon vocal."""
+    # Ignore tous les bots sans exception
     if member.bot:
         return
 
     guild = member.guild
 
-    # Quelqu'un rejoint un salon vocal
-    if after.channel and before.channel != after.channel:
+    # Un humain rejoint un vocal
+    if after.channel is not None:
         voice_client = guild.voice_client
 
-        # Le bot n'est pas encore connecté
-        if not voice_client or not voice_client.is_connected():
+        # Le bot n'est pas déjà connecté ET pas en train de se connecter
+        if not voice_client and guild.id not in connecting_guilds:
+            connecting_guilds.add(guild.id)
             try:
-                await asyncio.sleep(1)  # Délai pour éviter les boucles
                 voice_client = await after.channel.connect()
                 playing_guilds.add(guild.id)
+                print(f"✅ Connecté dans {after.channel.name}")
                 await play_next(voice_client, guild.id)
-                print(f"✅ Connecté dans {after.channel.name} sur {guild.name}")
             except Exception as e:
                 print(f"Erreur connexion : {e}")
+                playing_guilds.discard(guild.id)
+            finally:
+                connecting_guilds.discard(guild.id)
 
-    # Tout le monde a quitté le vocal → le bot se déconnecte
-    if before.channel:
+    # Un humain quitte un vocal
+    if before.channel is not None:
         humans = [m for m in before.channel.members if not m.bot]
         if len(humans) == 0:
             voice_client = guild.voice_client
             if voice_client and voice_client.channel == before.channel:
                 playing_guilds.discard(guild.id)
                 await voice_client.disconnect()
-                print(f"🔇 Déconnecté de {before.channel.name} (salon vide)")
+                print(f"🔇 Déconnecté (salon vide)")
 
 
 # ─── COMMANDES ────────────────────────────────────────────
 @bot.command()
 async def stop(ctx):
-    """!stop — Arrête la musique et déconnecte le bot."""
     if ctx.voice_client:
         playing_guilds.discard(ctx.guild.id)
         await ctx.voice_client.disconnect()
@@ -138,7 +147,6 @@ async def stop(ctx):
 
 @bot.command()
 async def skip(ctx):
-    """!skip — Passe à l'opening suivant."""
     if ctx.voice_client and ctx.voice_client.is_playing():
         ctx.voice_client.stop()
         await ctx.send("⏭️ Opening suivant !")
@@ -148,7 +156,6 @@ async def skip(ctx):
 
 @bot.command()
 async def volume(ctx, vol: int):
-    """!volume <0-100> — Règle le volume."""
     if ctx.voice_client and ctx.voice_client.source:
         if 0 <= vol <= 100:
             ctx.voice_client.source = discord.PCMVolumeTransformer(
@@ -163,7 +170,6 @@ async def volume(ctx, vol: int):
 
 @bot.command()
 async def liste(ctx):
-    """!liste — Affiche la liste des openings."""
     msg = "🎵 **Liste des openings :**\n"
     for i, o in enumerate(OPENINGS, 1):
         msg += f"`{i}.` {o}\n"
