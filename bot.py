@@ -41,7 +41,6 @@ FFMPEG_OPTIONS = {
     "options": "-vn",
 }
 
-# Verrous par guild pour éviter les connexions multiples
 connecting_guilds = set()
 playing_guilds = set()
 
@@ -72,7 +71,6 @@ async def play_next(voice_client, guild_id):
 
     url = await get_audio_url(query)
     if not url:
-        print(f"[{guild_id}] URL introuvable, on réessaie dans 3s...")
         await asyncio.sleep(3)
         await play_next(voice_client, guild_id)
         return
@@ -91,6 +89,19 @@ async def play_next(voice_client, guild_id):
         print(f"Erreur play : {e}")
 
 
+async def check_and_disconnect(guild, channel):
+    """Attend 2 secondes puis vérifie si le salon est vraiment vide."""
+    await asyncio.sleep(2)
+    # Recompte les humains après le délai
+    humans = [m for m in channel.members if not m.bot]
+    if len(humans) == 0:
+        voice_client = guild.voice_client
+        if voice_client and voice_client.is_connected():
+            playing_guilds.discard(guild.id)
+            await voice_client.disconnect()
+            print(f"🔇 Déconnecté de {channel.name} (salon vide)")
+
+
 # ─── ÉVÉNEMENTS ───────────────────────────────────────────
 @bot.event
 async def on_ready():
@@ -99,24 +110,27 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    # Ignore tous les bots sans exception
     if member.bot:
         return
 
     guild = member.guild
 
     # Un humain rejoint un vocal
-    if after.channel is not None:
+    if after.channel is not None and before.channel != after.channel:
         voice_client = guild.voice_client
 
-        # Le bot n'est pas déjà connecté ET pas en train de se connecter
         if not voice_client and guild.id not in connecting_guilds:
             connecting_guilds.add(guild.id)
             try:
-                voice_client = await after.channel.connect()
-                playing_guilds.add(guild.id)
-                print(f"✅ Connecté dans {after.channel.name}")
-                await play_next(voice_client, guild.id)
+                # Délai pour laisser Discord stabiliser
+                await asyncio.sleep(2)
+                # Vérifie qu'il y a encore des humains avant de se connecter
+                humans = [m for m in after.channel.members if not m.bot]
+                if len(humans) > 0:
+                    voice_client = await after.channel.connect()
+                    playing_guilds.add(guild.id)
+                    print(f"✅ Connecté dans {after.channel.name}")
+                    await play_next(voice_client, guild.id)
             except Exception as e:
                 print(f"Erreur connexion : {e}")
                 playing_guilds.discard(guild.id)
@@ -125,13 +139,7 @@ async def on_voice_state_update(member, before, after):
 
     # Un humain quitte un vocal
     if before.channel is not None:
-        humans = [m for m in before.channel.members if not m.bot]
-        if len(humans) == 0:
-            voice_client = guild.voice_client
-            if voice_client and voice_client.channel == before.channel:
-                playing_guilds.discard(guild.id)
-                await voice_client.disconnect()
-                print(f"🔇 Déconnecté (salon vide)")
+        asyncio.create_task(check_and_disconnect(guild, before.channel))
 
 
 # ─── COMMANDES ────────────────────────────────────────────
